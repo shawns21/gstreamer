@@ -503,25 +503,31 @@ gst_yolo_tensor_decoder_finalize (GObject * object)
 
 /* Extract bounding box from tensor data */
 static void
-gst_yolo_tensor_decoder_convert_bbox (const gfloat * candidate,
-    const gsize * offset, BBox * bbox)
+gst_yolo_tensor_decoder_convert_bbox (GstYoloTensorDecoder * self,
+    const gfloat * candidate, const gsize * offset, BBox * bbox)
 {
+  /* Retrieve actual video dimensions */
+  gint width = GST_VIDEO_INFO_WIDTH (&self->video_info);
+  gint height = GST_VIDEO_INFO_HEIGHT (&self->video_info);
+
   gfloat w = *(candidate + offset[2]);
   gfloat h = *(candidate + offset[3]);
-  bbox->x = *(candidate + offset[0]) - (w / 2);
-  bbox->y = *(candidate + offset[1]) - (h / 2);
-  bbox->w = w + 0.5;
-  bbox->h = h + 0.5;
+  
+  /* Multiply normalized 0.0-1.0 values by actual pixels */
+  bbox->x = (*(candidate + offset[0]) - (w / 2)) * width;
+  bbox->y = (*(candidate + offset[1]) - (h / 2)) * height;
+  bbox->w = w * width;
+  bbox->h = h * height;
 }
 
 /* Calculate iou between boundingbox of candidate c1 and c2
  */
 static gfloat
-gst_yolo_tensor_decoder_iou (const gfloat * c1, const gfloat * c2,
+gst_yolo_tensor_decoder_iou (GstYoloTensorDecoder * self, const gfloat * c1, const gfloat * c2,
     const gsize * offset, BBox * bb1, BBox * bb2)
 {
-  gst_yolo_tensor_decoder_convert_bbox (c1, offset, bb1);
-  gst_yolo_tensor_decoder_convert_bbox (c2, offset, bb2);
+  gst_yolo_tensor_decoder_convert_bbox (self, c1, offset, bb1);
+  gst_yolo_tensor_decoder_convert_bbox (self, c2, offset, bb2);
   return gst_analytics_image_util_iou_int (bb1->x, bb1->y, bb1->w, bb1->h,
       bb2->x, bb2->y, bb2->w, bb2->h);
 }
@@ -706,17 +712,24 @@ gst_yolo_tensor_decoder_decode_f32 (GstYoloTensorDecoder * self,
   g_array_sort (self->sel_candidates, gst_yolo_tensor_decoder_sort_candidates);
 
   if (gst_debug_category_get_threshold (GST_CAT_DEFAULT) >= GST_LEVEL_TRACE) {
+    /* Get dimensions for log visibility */
+    gint width = GST_VIDEO_INFO_WIDTH (&self->video_info);
+    gint height = GST_VIDEO_INFO_HEIGHT (&self->video_info);
+
     for (i = 0; i < self->sel_candidates->len; i++) {
       struct Candidate *c = &g_array_index (self->sel_candidates,
           struct Candidate, i);
+      
       GST_TRACE_OBJECT (self,
-          "Sorted: %zu: x,y=(%f;%f) w,h=(%f;%f), s=%f c=%f",
+          "Sorted: %zu: PIXELS x,y=(%.2f;%.2f) w,h=(%.2f;%.2f) [RAW x,y=(%f;%f)] c=%f",
           i,
+          c->candidate[x_offset] * width,
+          c->candidate[y_offset] * height,
+          c->candidate[w_offset] * width,
+          c->candidate[h_offset] * height,
           c->candidate[x_offset],
           c->candidate[y_offset],
-          c->candidate[w_offset],
-          c->candidate[h_offset],
-          c->candidate[w_offset] * c->candidate[h_offset], c->max_confidence);
+          c->max_confidence);
     }
   }
 
@@ -732,7 +745,7 @@ gst_yolo_tensor_decoder_decode_f32 (GstYoloTensorDecoder * self,
      * we're considering to keep or reject */
     for (gsize s = 0; s < self->selected->len && keep; s++) {
       const float *candidate2 = g_ptr_array_index (self->selected, s);
-      iou = gst_yolo_tensor_decoder_iou (c->candidate, candidate2,
+      iou = gst_yolo_tensor_decoder_iou (self, c->candidate, candidate2,
           offsets, &bb1, &bb2);
       keep = (iou <= self->iou_thresh);
     }
@@ -741,7 +754,7 @@ gst_yolo_tensor_decoder_decode_f32 (GstYoloTensorDecoder * self,
       if (self->selected->len == 0) {
         /* The first bounding-box always get in as there's no others bbox
          * to filter on based on IoU */
-        gst_yolo_tensor_decoder_convert_bbox (c->candidate, offsets, &bb1);
+        gst_yolo_tensor_decoder_convert_bbox (self, c->candidate, offsets, &bb1);
       }
 
       g_ptr_array_add (self->selected, (gpointer) c->candidate);
